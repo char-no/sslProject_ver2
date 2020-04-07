@@ -40,6 +40,7 @@ public class SSLHandshake {
     private String ClientCertificateFilePath = "C:/Program Files/Java/jdk1.8.0_101/bin/sslclient.cer";
     public X509Certificate serverCert, clientCert;
     private ByteArrayOutputStream baos = new ByteArrayOutputStream();
+    public byte[] client_macsecret, server_macsecret, client_writekey, server_writekey;
 
     void clientHello() throws NoSuchAlgorithmException, KeyManagementException, NoSuchAlgorithmException, KeyManagementException, KeyStoreException, FileNotFoundException, IOException, CertificateException, UnrecoverableKeyException {
        
@@ -271,18 +272,41 @@ public class SSLHandshake {
     
     void genKeyBlock(byte[] mastersecret, int[]clientRandom, int[]serverRandom) throws NoSuchAlgorithmException, IOException{
         //SHA-1 mac length = 20; sha mac key length = 20
-        
+        //20 bytes client MAC secret
+        //20 bytes server MAC secret
         
         //3DES_EDE_CBC = 24 bytes per key
         //24 bytes client write key
         //24 bytes server write key
         
+        //Note: each hash part is 16 bytes, 16x6 = 96
+        //We need 20 + 20 + 24 + 24 = 88 bytes in total, so we need 6 parts. (96 is closest we can get to 88).
         byte[] part1 = md5andshaprocessing("AA", mastersecret, clientRandom, serverRandom);
         byte[] part2 = md5andshaprocessing("BB", mastersecret, clientRandom, serverRandom);
         byte[] part3 = md5andshaprocessing("CCC", mastersecret, clientRandom, serverRandom);
         byte[] part4 = md5andshaprocessing("DDDD", mastersecret, clientRandom, serverRandom);
         byte[] part5 = md5andshaprocessing("EEEEE", mastersecret, clientRandom, serverRandom);
         byte[] part6 = md5andshaprocessing("FFFFFF", mastersecret, clientRandom, serverRandom);
+        
+        baos.write(part1);
+        baos.write(part2);
+        baos.write(part3);
+        baos.write(part4);
+        baos.write(part5);
+        baos.write(part6);
+        
+        byte[] keyblock = baos.toByteArray();
+        baos.reset();
+        
+        client_macsecret = new byte[20];
+        server_macsecret = new byte[20];
+        client_writekey = new byte[24];
+        server_writekey = new byte[24];
+        
+        System.arraycopy(keyblock, 0, client_macsecret, 0, 20);
+        System.arraycopy(keyblock, 20, server_macsecret, 0, 20);
+        System.arraycopy(keyblock, 40, client_writekey, 0, 24);
+        System.arraycopy(keyblock, 64, server_writekey, 0, 24);
     }
     
     byte[] md5andshaprocessing(String alphabets, byte[]secret, int[]clientRandom, int[]serverRandom) throws NoSuchAlgorithmException, IOException{
