@@ -34,10 +34,12 @@ import java.security.spec.InvalidKeySpecException;
 import java.security.spec.KeySpec;
 import static javax.crypto.Cipher.DECRYPT_MODE;
 import javax.crypto.KeyGenerator;
+import javax.crypto.Mac;
 import javax.crypto.SecretKey;
 import javax.crypto.SecretKeyFactory;
 import javax.crypto.spec.DESedeKeySpec;
 import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 import javax.xml.bind.DatatypeConverter;
 import static sslproject.HSserver.hsserver;
 
@@ -195,7 +197,8 @@ public class HSclient {
         PMS = client.generatePreMasterSecret(serverCert);
         byte[] PMSencrypted = client.RSAencrypt(PMS, serverCert);
         System.out.println("encrypted pre-master secret length: " + PMSencrypted.length);
-        bytesout.write(PMSencrypted);
+        //bytesout.write(PMSencrypted);
+        bytesout.write(PMS);
     }
     
     void sendClientVerify() throws IOException, NoSuchAlgorithmException, FileNotFoundException, CertificateException, KeyStoreException, UnrecoverableKeyException, NoSuchPaddingException, InvalidKeyException, IllegalBlockSizeException, BadPaddingException, UnrecoverableEntryException, InvalidKeySpecException, URISyntaxException {
@@ -289,8 +292,15 @@ public class HSclient {
      }
     
     void FinishedMessage(byte[] senderID, String cipher) throws IOException, NoSuchAlgorithmException, IllegalBlockSizeException, InvalidKeyException, NoSuchPaddingException, BadPaddingException, InvalidKeySpecException{
-        baos.write(hsmessages);
-        baos.write(clientverifymsg);
+        baos.write(clientHelloMessage);
+        baos.write(serverhello);
+        baos.write(sCertBytes);
+        baos.write(certReq);
+        baos.write(hellodone);        
+  //      baos.write(cCertBytes);
+        baos.write(PMS);
+
+//        baos.write(clientverifymsg);
         totalhsmessages = baos.toByteArray();
         baos.reset();
         
@@ -301,7 +311,7 @@ public class HSclient {
         byte[] finishedmsg = baos.toByteArray();
         baos.reset();
         
-        byte[] encryptedfinishedmsg = encryptFinish(finishedmsg, cipher, mastersecret);
+        byte[] encryptedfinishedmsg = encryptMsg(finishedmsg, cipher, mastersecret);
         System.out.println("Encrypted finished message size: " + encryptedfinishedmsg.length);
         bytesout.write(clientivs);
         bytesout.write(encryptedfinishedmsg);
@@ -327,7 +337,17 @@ public class HSclient {
          System.out.println("Finished msg received from server: " + finishedmsg);
      }
     
-    byte[] encryptFinish(byte[] message, String ciphertype, byte[] mastersecret) throws IllegalBlockSizeException, InvalidKeyException, NoSuchPaddingException, NoSuchAlgorithmException, BadPaddingException, InvalidKeySpecException, IOException{
+    void ByteArrayToFile(byte[] byteArray) throws IOException{
+        File myfile = new File("cheatingtime.txt");
+        if(myfile.createNewFile()){
+            System.out.println("File created.");
+        }
+
+        FileWriter fw = new FileWriter(myfile, false);
+        fw.write(Base64.getEncoder().encodeToString(byteArray));
+    }
+    
+    byte[] encryptMsg(byte[] message, String ciphertype, byte[] mastersecret) throws IllegalBlockSizeException, InvalidKeyException, NoSuchPaddingException, NoSuchAlgorithmException, BadPaddingException, InvalidKeySpecException, IOException{
         Cipher ciph = Cipher.getInstance(ciphertype);
         keyBlock = client.genKeyBlock(mastersecret, clientcookie, servercookie);
         
@@ -343,6 +363,58 @@ public class HSclient {
         System.out.println("Iv length: " + clientivs.length);
         
         return ciph.doFinal(message);
+    }
+    
+    void RLsendmessage(String msg) throws NoSuchAlgorithmException, InvalidKeyException, IOException, IllegalBlockSizeException, NoSuchPaddingException, BadPaddingException, InvalidKeySpecException{
+        Mac cMac = Mac.getInstance("HmacSHA1");
+        cMacSecret = new byte[20];
+        
+        //client_macsecret is first 20 bytes of keyblock
+        System.arraycopy(keyBlock, 0, cMacSecret, 0, 20);
+        SecretKeySpec cMacKey = new SecretKeySpec(cMacSecret, "HmacSHA1");
+        cMac.init(cMacKey);
+        
+        byte[] hash = cMac.doFinal(msg.getBytes());
+        
+        baos.write(msg.getBytes());
+        baos.write(hash);
+        
+        byte[] msg_preEncr = baos.toByteArray();
+        baos.reset();
+        byte[] enc_msg = encryptMsg(msg_preEncr, "DESede/CBC/PKCS5Padding", mastersecret);
+        byte[] SSLHeader = produceSSLRecordHeader(enc_msg);
+        
+      
+        
+        baos.write(SSLHeader);
+        baos.write(enc_msg);
+        
+        byte[] msgtosend = baos.toByteArray();
+        baos.reset();
+        
+        bytesout.write(msgtosend);
+        bytesout.write(clientivs);
+        System.out.println("Client sending message to server: (SSLRECORDLAYER) " + msg);
+        System.out.println("Whole datapacket length: " + msgtosend.length);
+    }
+    
+    byte[] produceSSLRecordHeader(byte[] encryptedmsg) throws IOException{
+        //SSLRecordType = 23 = Application Layer
+        byte SSLRecordType = (byte)23;
+        byte[] SSLVersion = {(byte)0x03, (byte)0x00};
+        byte msglength = (byte)encryptedmsg.length;
+        baos.write(SSLRecordType);
+        baos.write(SSLVersion);
+        baos.write(msglength);
+        
+        byte[] SSLRecordHeader = baos.toByteArray();
+        baos.reset();
+        return SSLRecordHeader;
+    }
+    
+    void clearbuffer() throws IOException{
+        bytesout.write("Clear this please".getBytes());
+        bytesout.flush();
     }
     
     
@@ -364,14 +436,15 @@ public class HSclient {
         hsclient.waitForHelloFinish();
         
         /*SSL HANDSHAKE: part 3*/
-        hsclient.sendCertificate();
+      //  hsclient.sendCertificate();
+        //hsclient.clearbuffer();
         hsclient.sendPreMasterSecret();
        hsclient.mastersecret = client.generateMasterSecret("Master Secret", PMS, hsclient.clientcookie, hsclient.servercookie);
         
         System.out.println("This is the client's master secret: " + hsclient.ConvertBytetoString(hsclient.mastersecret));
         
         //TO DO: finish up sendClientVerify() 
-        hsclient.sendClientVerify();
+//        hsclient.sendClientVerify();
 
         
         /*SSL HANDSHAKE: part 4*/
@@ -396,6 +469,7 @@ public class HSclient {
         //byte 0 = SSL Record type = SSL_R3_APPLICATION_DATA = 17 (in hex) (decimal = 23)
         //bytes 1-2 = SSL version = SSL3_VERSION = 0x0300
         //bytes 3-4 = datasize in payload (excluding this header itself)
+        hsclient.RLsendmessage("Hi my guy! This is the record layer.");
 
     }
     

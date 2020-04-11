@@ -362,9 +362,6 @@ public class SSLHandshake {
         
         byte [] beforemd5 = baos.toByteArray();
         byte[] wholepart = md.digest(beforemd5);
-        
-        System.out.println("Before processing with md5" + beforemd5 + "\nAfter processing with md5: " + wholepart);      
-        System.out.println("Part " + partnum + " length: " + wholepart.length);
  
         baos.reset();
         return wholepart;
