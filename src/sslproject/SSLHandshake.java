@@ -270,7 +270,7 @@ public class SSLHandshake {
         return result;
     }
     
-    void genKeyBlock(byte[] mastersecret, int[]clientRandom, int[]serverRandom) throws NoSuchAlgorithmException, IOException{
+    byte[] genKeyBlock(byte[] mastersecret, int[]clientRandom, int[]serverRandom) throws NoSuchAlgorithmException, IOException{
         //SHA-1 mac length = 20; sha mac key length = 20
         //20 bytes client MAC secret
         //20 bytes server MAC secret
@@ -307,6 +307,7 @@ public class SSLHandshake {
         System.arraycopy(keyblock, 20, server_macsecret, 0, 20);
         System.arraycopy(keyblock, 40, client_writekey, 0, 24);
         System.arraycopy(keyblock, 64, server_writekey, 0, 24);
+        return keyblock;
     }
     
     byte[] md5andshaprocessing(String alphabets, byte[]secret, int[]clientRandom, int[]serverRandom) throws NoSuchAlgorithmException, IOException{

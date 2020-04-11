@@ -18,15 +18,25 @@ import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 import java.net.*;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.security.spec.InvalidKeySpecException;
+import java.security.spec.PKCS8EncodedKeySpec;
 import javax.net.ssl.SSLServerSocketFactory;
 import java.util.*;
 import javax.crypto.BadPaddingException;
 import javax.crypto.Cipher;
 import static javax.crypto.Cipher.DECRYPT_MODE;
+import static javax.crypto.Cipher.ENCRYPT_MODE;
 import javax.crypto.IllegalBlockSizeException;
 import javax.crypto.NoSuchPaddingException;
+import javax.crypto.SecretKey;
+import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.DESedeKeySpec;
+import javax.crypto.spec.IvParameterSpec;
+import javax.xml.bind.DatatypeConverter;
 
 public class HSserver {
     private SSLServerSocketFactory sslsockfactory;
@@ -43,18 +53,27 @@ public class HSserver {
     private String keystorefilepath = "C:/Program Files/Java/jdk1.8.0_101/bin/keystore.pfx";
     private X509Certificate serverCert, clientCert;
     
+    static byte[] clientHello, epms;
     private byte[] serverHelloMessage;
     private byte[] serverCertificateBytes;
     private byte[] certRequest, clientCertBytes;
     private byte[] hellodone;
+    byte[] encryptedclientverifymsg;
+    static byte[] MasterSecret;
+    byte[] KeyBlock;
+    byte[] serverivs;
+    
+    byte[] cWritekey, sWritekey, cMacSecret, sMacSecret;
     
     PublicKey serverpubk, clientpubk;
     PrivateKey serverPrK;
-    
+        
     private SSLContext context;
     private InputStream bytesin;
     private OutputStream bytesout;
-    SSLHandshake hsserver = new SSLHandshake();
+    static SSLHandshake hsserver = new SSLHandshake();
+    
+     private ByteArrayOutputStream baos = new ByteArrayOutputStream();
     
     public void Init() throws NoSuchAlgorithmException, KeyManagementException, KeyStoreException, IOException, FileNotFoundException, CertificateException, UnrecoverableKeyException{
         context = hsserver.create_init_SSLContext(version, hsserver.KeyStoreFilePath);
@@ -73,9 +92,7 @@ public class HSserver {
         return message;
     }
     
-    void rcvPMS(byte[] output) throws IOException{
-        bytesin.read(output);
-    }
+
     
     String ConvertBytetoString(byte[] bytemessage){
         StringBuilder bye = new StringBuilder();
@@ -170,7 +187,7 @@ public class HSserver {
         return clientCert;
     }
     
-     void generatePrivateKeyfromCertificate(X509Certificate cert) throws FileNotFoundException, IOException, NoSuchAlgorithmException, CertificateException, KeyStoreException, UnrecoverableKeyException, UnrecoverableEntryException{
+     void generatePrivateKeyfromCertificate(X509Certificate cert) throws FileNotFoundException, IOException, NoSuchAlgorithmException, CertificateException, KeyStoreException, UnrecoverableKeyException, UnrecoverableEntryException, InvalidKeySpecException{
         //TO DO: Generate key pair from given X509Certificate to be used in RSA asymmetric encryption/decrption for client/server verification/communication purposes.
         //loading keystore
         KeyStore keyStore = KeyStore.getInstance("PKCS12");
@@ -188,43 +205,135 @@ public class HSserver {
                 fis.close();
             }
         }
-       serverPrK = (PrivateKey)keyStore.getKey("sslserver", password);
+       //serverPrK = (PrivateKey)keyStore.getKey("sslserver", password);
+        String filepath = "pks_to_pem/ServerKey.pk8";
+ 
+        KeyFactory kf = KeyFactory.getInstance("RSA");
+        byte[] keyBytes = Files.readAllBytes(Paths.get(filepath));
+        String keystring = new String(keyBytes);
+        keystring = keystring.replaceAll("\\n", "").replace("-----BEGIN PRIVATE KEY-----", "").replace("-----END PRIVATE KEY-----", "");
+//keyBytes = Base64.getDecoder().decode(keystring);
+         keyBytes = DatatypeConverter.parseBase64Binary(keystring);
+        System.out.println(keystring);
+        PKCS8EncodedKeySpec keySpecPKCS8 = new PKCS8EncodedKeySpec(keyBytes);
+        serverPrK = kf.generatePrivate(keySpecPKCS8);
+
+        System.out.println("This is the server private key: " + serverPrK);
        serverpubk = cert.getPublicKey();
     }
      
-     byte[] decryptRSAPrK(byte[] message) throws InvalidKeyException, IllegalBlockSizeException, BadPaddingException, IOException, FileNotFoundException, NoSuchAlgorithmException, CertificateException, KeyStoreException, UnrecoverableEntryException, NoSuchPaddingException {
+     byte[] decryptRSAPrK(byte[] message) throws InvalidKeyException, IllegalBlockSizeException, BadPaddingException, IOException, FileNotFoundException, NoSuchAlgorithmException, CertificateException, KeyStoreException, UnrecoverableEntryException, NoSuchPaddingException, UnrecoverableKeyException, InvalidKeySpecException {
          generatePrivateKeyfromCertificate(serverCert);
          Cipher RSACipher = Cipher.getInstance("RSA");
          RSACipher.init(DECRYPT_MODE, serverPrK);
-         byte[] decryptedmsg = RSACipher.doFinal(message);
+         System.out.println("Size of encrypted message: " + message.length);
+         byte[] decryptedmsg = RSACipher.update(message);
          return decryptedmsg;
      }
      
-     byte[] decryptRSAPuK(byte[] input) throws NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException, IllegalBlockSizeException, BadPaddingException{
+     byte[] decryptRSAPuK(byte[] input) throws NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException, IllegalBlockSizeException, BadPaddingException, InvalidAlgorithmParameterException{
          PublicKey clientpubk = clientCert.getPublicKey();
          Cipher RSACipher = Cipher.getInstance("RSA");
          RSACipher.init(DECRYPT_MODE, clientpubk);
-         byte[] decryptedmsg = RSACipher.doFinal(input);
+         byte[] decryptedmsg = RSACipher.update(input);
          return decryptedmsg;
      }
      
+     void processClientVerify() throws NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException, IllegalBlockSizeException, BadPaddingException, InvalidAlgorithmParameterException, IOException{
+ 
+        encryptedclientverifymsg = new byte[256];
+        bytesin.read(encryptedclientverifymsg);
+
+        System.out.println("encrypted message length: " + encryptedclientverifymsg.length);
+        byte[] e_CVmsg = new byte[encryptedclientverifymsg.length];
+        System.arraycopy(encryptedclientverifymsg, 0, e_CVmsg, 0, encryptedclientverifymsg.length);
+        
+        byte[] clientverifymsg = decryptRSAPuK(e_CVmsg);
+     }
+     
      void rcvChangeCipherSpec() throws IOException{
-         if (bytesin.read() == (byte)1){
+         byte [] changecipherspec = new byte[1];
+         bytesin.read(changecipherspec);
+         System.out.println("Change cipher spec msg content: "+(int)changecipherspec[0]);
+         if (changecipherspec[0] == (byte)1){
              System.out.println("Change cipher spec message from client was received.");
          }
      }
      
+     void rcvFinishedMsg() throws IOException, NoSuchAlgorithmException, InvalidKeyException, InvalidKeySpecException, NoSuchPaddingException, InvalidAlgorithmParameterException{
+         byte[] ivs = new byte[8];
+         bytesin.read(ivs);
+         byte[] encryptedmsg = new byte[40];
+         bytesin.read(encryptedmsg);
+         
+         Cipher DeCipher = Cipher.getInstance("DESede/CBC/PKCS5Padding");
+         KeyBlock = hsserver.genKeyBlock(MasterSecret, cCookie, sCookie);
+         cWritekey = new byte[24];
+         System.arraycopy(KeyBlock, 40, cWritekey, 0, 24);
+         SecretKeyFactory skf = SecretKeyFactory.getInstance("DESede");
+         DESedeKeySpec kspec = new DESedeKeySpec(cWritekey);
+        SecretKey CWK = skf.generateSecret(kspec);
+        IvParameterSpec IV = new IvParameterSpec(ivs);
+        DeCipher.init(DECRYPT_MODE, CWK, IV);
+
+         byte[] finishedmsg = DeCipher.update(encryptedmsg);
+         System.out.println("Finished msg received from client: " + finishedmsg);
+     }
+     
      void ChangeCipherSpec() throws IOException {  
-        byte message = (byte)1;
+        byte message = 0x01;
+        System.out.println("Change cipher spec message value sent to client: " + (int)message);
         bytesout.write(message);
     }
+     
+     void FinishedMessage(byte[] senderID, String cipher) throws IOException, NoSuchAlgorithmException, IllegalBlockSizeException, InvalidKeyException, NoSuchPaddingException, BadPaddingException, InvalidKeySpecException{
+         baos.write(clientHello);
+        baos.write(serverHelloMessage);
+        baos.write(serverCertificateBytes);
+        baos.write(certRequest);
+        baos.write(hellodone);
+        baos.write(clientCertBytes);
+        baos.write(encryptedclientverifymsg);
+        baos.write(epms);
+        byte[] totalhsmessages = baos.toByteArray();
+        baos.reset();
+        
+        byte[] md5hash = hsserver.generateFinishedMsg("MD5", MasterSecret, totalhsmessages, senderID);
+        byte[] shahash = hsserver.generateFinishedMsg("SHA-1", MasterSecret, totalhsmessages, senderID);
+        baos.write(md5hash);
+        baos.write(shahash);
+        byte[] finishedmsg = baos.toByteArray();
+        baos.reset();
+        
+        byte[] encryptedfinishedmsg = encryptFinish(finishedmsg, cipher, MasterSecret);
+        System.out.println("Encrypted finished message size: " + encryptedfinishedmsg.length);
+        bytesout.write(serverivs);
+        bytesout.write(encryptedfinishedmsg);
+    }
+     
+     byte[] encryptFinish(byte[] message, String ciphertype, byte[] mastersecret) throws IllegalBlockSizeException, InvalidKeyException, NoSuchPaddingException, NoSuchAlgorithmException, BadPaddingException, InvalidKeySpecException, IOException{
+        Cipher ciph = Cipher.getInstance(ciphertype);
+        
+        sWritekey = new byte[24];
+        System.arraycopy(KeyBlock, 40, cWritekey, 0, 24);
+        
+        SecretKeyFactory skf = SecretKeyFactory.getInstance("DESede");
+        DESedeKeySpec kspec = new DESedeKeySpec(cWritekey);
+
+        SecretKey CWK = skf.generateSecret(kspec);
+        ciph.init(ENCRYPT_MODE, CWK);
+        serverivs = ciph.getIV();
+        System.out.println("Iv length: " + serverivs.length);
+        
+        return ciph.doFinal(message);
+    }
     
-    public static void main(String[]args)throws NoSuchAlgorithmException, KeyManagementException, KeyStoreException, IOException, FileNotFoundException, CertificateException, UnrecoverableKeyException, NoSuchPaddingException, InvalidKeyException, IllegalBlockSizeException, BadPaddingException, UnrecoverableEntryException{
+    public static void main(String[]args)throws NoSuchAlgorithmException, KeyManagementException, KeyStoreException, IOException, FileNotFoundException, CertificateException, UnrecoverableKeyException, NoSuchPaddingException, InvalidKeyException, IllegalBlockSizeException, BadPaddingException, UnrecoverableEntryException, InvalidAlgorithmParameterException, InvalidKeySpecException, InterruptedException{
         HSserver server = new HSserver();
         server.Init();
         
         /**SSL HANDSHAKE: part 1**/
-        byte[] clientHello = server.rcvMsg();
+        clientHello = server.rcvMsg();
 
         String clientshello = server.ConvertBytetoString(clientHello);
         System.out.println("This is the client hello received: "+ clientshello);
@@ -243,14 +352,20 @@ public class HSserver {
         server.receiveCert();
         
         //second message: pre-master secret, encrypted in server's public key. Must decrypt with server's private key from server's X509Certificate.
-        byte[] encryptedPMS = new byte[256];
-        server.rcvPMS(encryptedPMS);
-        byte[] PMS = server.decryptRSAPrK(encryptedPMS);
+        byte[] encryptedPMS = server.rcvMsg();
+        epms = new byte[256];
         
+        System.arraycopy(encryptedPMS, 0, epms, 0, 256);
+        
+        
+        byte[] PMS = server.decryptRSAPrK(epms);
+        System.out.println("This is sparta: " + PMS);
+        
+        MasterSecret = hsserver.generateMasterSecret("Master Secret", PMS, server.cCookie, server.sCookie);
+        System.out.println("This it the master secret produced by the server based on the received pre-master secret: " + server.ConvertBytetoString(MasterSecret));
         //Third message: clientverifymsg.
         //Verify client's certificate by decrypting clientverifymsg with client's public key from client's X509Certificate.
-        byte[] encryptedclientverifymsg = server.rcvMsg();
-        byte[] clientverifymsg = server.decryptRSAPuK(encryptedclientverifymsg);
+        server.processClientVerify();
         
         
         /*SSL HANDSHAKE: part 4*/
@@ -258,13 +373,21 @@ public class HSserver {
         //receive client's change_cipher_spec message
         server.rcvChangeCipherSpec();
         //receive client's finished_message
-        byte[] encrypted_clientfinishedmessage = server.rcvMsg();
+        server.rcvFinishedMsg();
+    
         
         //send change_cipher_spec; message contents is a single byte, value of '1'
         server.ChangeCipherSpec();
+
         //send finished_message = concat of two values: MD5hash size[16] and SHAhash size [20]
         //MD5(mastersecret + pad2 + SHA(hsmessages + senderid + mastersecret + pad1))
         //SHA(mastersecret + pad2 + SHA(hsmessages + senderid + mastersecret + pad1))
+        server.FinishedMessage("server".getBytes(), "DESede/CBC/PKCS5Padding");
         
+        //SSL Record Layer
+        //header = 5 bytes
+        //byte 0 = SSL Record type = SSL_R3_APPLICATION_DATA = 17 (in hex) (decimal = 23)
+        //bytes 1-2 = SSL version = SSL3_VERSION = 0x0300
+        //bytes 3-4 = datasize in payload (excluding this header itself)
     }
 }
